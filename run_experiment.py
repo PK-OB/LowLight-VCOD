@@ -608,47 +608,83 @@ def main(args):
     else: logger.info("No checkpoint. Start from scratch.")
 
     # 데이터셋 및 데이터로더
+    # run_experiment.py (DCNet 이전 버전, main 함수 내부 데이터 분할 로직 수정)
+
+    # ... (로거, 디바이스, 모델, 옵티마이저, 스케줄러, 손실 함수 등 초기화 코드) ...
+
+    # --- 데이터셋 로딩 및 분할 (수정된 로직) ---
     try:
-        if train_cfg.get('dataset_type') != 'folder': raise ValueError("Only 'folder' dataset_type is supported now.")
-        if not train_cfg.get('original_data_root'): raise ValueError("'original_data_root' needed in config.")
-        
-        common_dataset_args = {
-            "root_dir": train_cfg['folder_data_root'], 
-            "original_data_root": train_cfg['original_data_root'],
+        if train_cfg.get('dataset_type') != 'folder':
+            raise ValueError("Only 'folder' dataset_type is supported.")
+        folder_root = train_cfg.get('folder_data_root')
+        original_root = train_cfg.get('original_data_root')
+        if not folder_root or not original_root:
+            raise ValueError("'folder_data_root' or 'original_data_root' missing in config.")
+
+        common_args = {
+            "root_dir": folder_root,
+            "original_data_root": original_root,
             "image_folder_name": train_cfg.get('image_folder_name', 'Imgs'),
-            "mask_folder_name": train_cfg.get('mask_folder_name', 'GT'), 
-            "clip_len": common_cfg.get('clip_len', 8), 
+            "mask_folder_name": train_cfg.get('mask_folder_name', 'GT'),
+            "clip_len": common_cfg.get('clip_len', 8),
             "resolution": train_cfg.get('resolution', (224, 224)),
         }
-        train_dataset_full = FolderImageMaskDataset(**common_dataset_args, is_train=True, use_augmentation=train_cfg.get('use_augmentation', True))
-        val_dataset_full = FolderImageMaskDataset(**common_dataset_args, is_train=False, use_augmentation=False)
-            
-        logger.info(f"Load folder dataset from: {train_cfg['folder_data_root']}")
-        logger.info(f"Load original day images from: {train_cfg['original_data_root']}")
-        logger.info(f"Data Augmentation: {train_cfg.get('use_augmentation', True)}")
-        
-        total_size = len(train_dataset_full); train_size = int(0.8 * total_size); val_size = total_size - train_size
-        if total_size == 0: raise ValueError("Dataset is empty.")
-        train_dataset, _ = random_split(train_dataset_full, [train_size, val_size])
-        val_dataset = val_dataset_full 
-        if len(train_dataset) == 0 or len(val_dataset) == 0: raise ValueError("Dataset split resulted in empty set.")
 
-    except Exception as e: logger.error(f"Dataset setup failed: {e}"); return
+        # Augmentation 적용된 전체 학습 데이터셋 로드 (Subset 생성용)
+        train_dataset_full_aug = FolderImageMaskDataset(**common_args, is_train=True, use_augmentation=True)
+        # Augmentation 미적용 전체 데이터셋 로드 (분할 기준 및 검증용)
+        val_dataset_full_noaug = FolderImageMaskDataset(**common_args, is_train=False, use_augmentation=False)
 
-    # collate_fn
+        if len(val_dataset_full_noaug) == 0:
+            raise ValueError("Dataset is empty. Check paths and data.")
+
+        logger.info(f"Loaded dataset from: {folder_root} & {original_root}")
+        logger.info(f"Total clips found: {len(val_dataset_full_noaug)}")
+
+        # --- 정확한 80:20 분할 로직 ---
+        split_ratio = train_cfg.get('train_val_split_ratio', 0.8) # Config에서 비율 읽기 (없으면 0.8)
+        total_size = len(val_dataset_full_noaug)
+        train_size = int(split_ratio * total_size)
+        val_size = total_size - train_size
+
+        # 재현성을 위한 시드 고정 (옵션)
+        split_seed = train_cfg.get('split_seed', 42)
+        generator = torch.Generator().manual_seed(split_seed)
+
+        logger.info(f"Splitting dataset ({total_size} clips) into {train_size} train ({split_ratio*100:.1f}%) and {val_size} validation using seed {split_seed}.")
+
+        # Augmentation 없는 데이터셋을 기준으로 random_split 실행
+        # train_indices_subset: 학습용 인덱스를 가진 Subset (Aug 미적용 데이터 기반)
+        # val_dataset: 검증용 Subset (Aug 미적용 데이터 기반)
+        train_indices_subset, val_dataset = random_split(val_dataset_full_noaug, [train_size, val_size], generator=generator)
+
+        # 실제 학습에 사용할 train_dataset 생성
+        # train_indices_subset에서 인덱스만 추출하여, Augmentation 적용된 데이터셋에서 Subset 생성
+        train_dataset = Subset(train_dataset_full_aug, train_indices_subset.indices)
+
+        # 검증 데이터셋은 random_split 결과(val_dataset) 그대로 사용 (Aug 미적용)
+
+        if len(train_dataset) == 0 or len(val_dataset) == 0:
+            raise ValueError("Dataset split resulted in empty train or validation set.")
+        # --- 분할 로직 끝 ---
+
+    except Exception as e:
+        logger.error(f"Dataset setup or split failed: {e}")
+        return # 데이터 준비 실패 시 종료
+
+    # collate_fn (3개 항목 처리, 이전 멀티태스크 버전과 동일)
     def collate_fn(batch):
-        batch = list(filter(lambda x: x is not None, batch))
+        batch = list(filter(lambda x: x is not None and isinstance(x,tuple) and len(x)==3, batch))
         if not batch: return None
         try: return torch.utils.data.dataloader.default_collate(batch)
-        except Exception as e:
-            logging.warning(f"Collate error, skip batch: {e}")
-            if batch and isinstance(batch[0], tuple) and len(batch[0]) == 3: logging.warning(f"Shapes fail batch[0]: N-{batch[0][0].shape}, M-{batch[0][1].shape}, D-{batch[0][2].shape}")
-            return None
+        except Exception as e: logger.warning(f"Collate error, skip batch: {e}"); return None
 
-    # 데이터로더
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=True, num_workers=common_cfg.get('num_workers', 4), pin_memory=True, collate_fn=collate_fn, drop_last=True) 
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg.get('val_batch_size', train_cfg['batch_size']), shuffle=False, num_workers=common_cfg.get('num_workers', 4), pin_memory=True, collate_fn=collate_fn)
-    logger.info(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} val.")
+    # 데이터로더 생성 (train_dataset, val_dataset 사용)
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg.get('batch_size',4), shuffle=True, num_workers=common_cfg.get('num_workers',4), pin_memory=True, collate_fn=collate_fn, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=train_cfg.get('val_batch_size',8), shuffle=False, num_workers=common_cfg.get('num_workers',4), pin_memory=True, collate_fn=collate_fn)
+    logger.info(f"Dataset split confirmed: {len(train_dataset)} train, {len(val_dataset)} val.") # <-- 이제 로그와 실제 크기 일치!
+
+# ... (샘플 검증, 학습 루프 등 나머지 코드는 이전 멀티태스크 버전과 동일) ...
 
     # 샘플 이미지 검증
     if start_epoch == 0 and len(train_dataset) > 0 :
