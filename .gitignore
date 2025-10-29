@@ -1,0 +1,7 @@
+data/
+vcod_env/
+checkpoints/
+__pycache__/
+logs/
+Miniconda3-latest-Linux-x86_64.sh
+Miniconda3-latest-Linux-x86_64.sh
