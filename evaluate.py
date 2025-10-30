@@ -1,5 +1,5 @@
-# pk-ob/jed-vcod/JED-VCOD-cc543b29cefb3a45b940bfd01f42c33af7a6bb25/evaluate.py
-# (torch.load에 weights_only=False 추가 버전)
+# evaluate.py
+# (최신 DCNetStyleVCOD 모델 아키텍처에 맞게 수정된 버전)
 
 import torch
 import torch.nn as nn # L1Loss 사용
@@ -17,7 +17,9 @@ import logging # 로깅 추가
 
 # 사용자 정의 모듈 임포트
 from config import cfg
-from models.main_model import VideoSwinVCOD # <-- 새로운 모델 임포트
+# ▼▼▼ [최신 모델] DCNetStyleVCOD 임포트 ▼▼▼
+from models.main_model import DCNetStyleVCOD
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 from datasets.folder_mask_dataset import FolderImageMaskDataset # Multi-Task 데이터셋
 from utils.py_sod_metrics import SODMetrics
 # utils.logger는 별도 설정 없이 기본 logging 사용
@@ -81,6 +83,7 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg):
             video_clip_batch = video_clip.unsqueeze(0).to(device)
 
             try:
+                # DCNetStyleVCOD도 동일한 (logits, recon) 튜플을 반환
                 predicted_logits_seq, reconstructed_images_flat = model(video_clip_batch)
                 predicted_mask_seq = torch.sigmoid(predicted_logits_seq)
             except Exception as e:
@@ -153,6 +156,7 @@ def main():
     eval_cfg = cfg.evaluate
     # 학습 시 사용된 설정도 일부 필요 (모델 초기화 등)
     try:
+        # train_cfg에서 모델 하이퍼파라미터를 읽어와야 함
         train_cfg_temp = cfg.train
     except AttributeError:
         logger.warning("cfg.train not found in config.py. Using default values for model init.")
@@ -169,20 +173,23 @@ def main():
     logger.info("--- Starting Evaluation ---")
     logger.info(f"Using device: {device}")
 
-    # 모델 초기화 (VideoSwinVCOD 사용)
+    # ▼▼▼ [최신 모델] DCNetStyleVCOD 초기화 로직 ▼▼▼
     try:
-        model = VideoSwinVCOD(
+        model = DCNetStyleVCOD(
             backbone_name=train_cfg_temp.get('backbone_name', 'swin_small_patch4_window7_224'),
             input_size=train_cfg_temp.get('resolution', (224, 224)),
             num_frames=common_cfg.get('clip_len', 8),
             pretrained=False, # 평가 시에는 체크포인트 로드
-            decoder_channel=train_cfg_temp.get('decoder_channel', 256),
+            # DCNetStyleVCOD에 필요한 파라미터 (cfg.train에서 읽어옴)
+            gru_hidden_dim=train_cfg_temp.get('gru_hidden_dim', 128),
+            decoder_channel=train_cfg_temp.get('decoder_channel', 64),
             use_enhancement=eval_cfg.get('calculate_enhancement_loss', True)
         ).to(device)
         logger.info(f"Model '{type(model).__name__}' created for evaluation.")
     except Exception as e:
         logger.error(f"Failed to create model: {e}")
         return
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     # 체크포인트 로드
     checkpoint_path = eval_cfg.get('checkpoint_path')
@@ -192,17 +199,50 @@ def main():
 
     try:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
-        # ▼▼▼ [오류 수정] weights_only=False 추가 ▼▼▼
+        # weights_only=False로 설정하여 객체(config)도 로드 시도 (권장)
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
         model_state_dict = checkpoint.get('model_state_dict')
         if not model_state_dict:
              logger.warning("Checkpoint key 'model_state_dict' not found. Trying to load entire object.")
              model_state_dict = checkpoint
+        
+        # ▼▼▼ [중요] 체크포인트의 config와 현재 config 비교 ▼▼▼
+        # 체크포인트에 config가 저장되어 있는지 확인
+        if 'config' in checkpoint and checkpoint['config']:
+            logger.info("Config found in checkpoint. Verifying parameters...")
+            ckpt_train_cfg = checkpoint['config'].train
+            
+            # 모델 구조에 영향을 주는 중요 파라미터 비교
+            mismatch = False
+            params_to_check = ['backbone_name', 'gru_hidden_dim', 'decoder_channel']
+            for param in params_to_check:
+                ckpt_val = ckpt_train_cfg.get(param)
+                curr_val = train_cfg_temp.get(param)
+                # 기본값 처리 (config에 명시되지 않았을 경우)
+                if param == 'gru_hidden_dim' and curr_val is None: curr_val = 128
+                if param == 'decoder_channel' and curr_val is None: curr_val = 64
+                
+                if ckpt_val != curr_val:
+                    logger.warning(f"Config mismatch! Param: '{param}' | Checkpoint: {ckpt_val} | Current Cfg: {curr_val}")
+                    mismatch = True
+                    
+            if mismatch:
+                 logger.error("Model structure mismatch detected based on config. ABORTING.")
+                 logger.error("Please ensure your config.py matches the one used for training, OR")
+                 logger.error("use a checkpoint that matches the current config.py settings.")
+                 return # *** 중요: 불일치 시 중단 ***
+            else:
+                 logger.info("Config parameters match. Proceeding with loading.")
+        else:
+            logger.warning("No 'config' key found in checkpoint. Cannot verify parameters. Trying to load weights anyway...")
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
-        # 모델 상태 로드 (유연하게)
-        load_result = model.load_state_dict(model_state_dict, strict=False)
+        # 모델 상태 로드 (strict=True로 변경하여 정확한 일치 확인)
+        # 만약 위 config 검증 로직을 사용한다면, strict=True가 더 안전합니다.
+        # 만약 config 검증 없이 유연하게 로드하려면 strict=False를 사용하세요.
+        load_result = model.load_state_dict(model_state_dict, strict=True) 
+        
         logger.info(f"Checkpoint load result: {load_result}")
         if load_result.missing_keys: logger.warning(f"Missing keys during load: {load_result.missing_keys}")
         if load_result.unexpected_keys: logger.warning(f"Unexpected keys during load: {load_result.unexpected_keys}")
@@ -213,7 +253,9 @@ def main():
          logger.error(f"ImportError loading checkpoint: {e}. Check if required classes (like config.Config) are defined and importable.")
          return
     except Exception as e:
+        # strict=True로 인해 발생하는 size mismatch 오류가 여기서 잡힙니다.
         logger.error(f"Failed to load checkpoint '{checkpoint_path}': {e}")
+        logger.error("This often means the checkpoint architecture does not match the current model definition OR config.py settings.")
         return
 
     # RAFT 모델 (Warping Error용)
@@ -226,7 +268,7 @@ def main():
             logger.info("RAFT model loaded.")
         except Exception as e: logger.error(f"Failed to load RAFT model: {e}. Warping Error disabled."); calculate_warping_error = False
     else: logger.info("Warping Error calculation disabled.")
-    l1_loss = nn.L1Loss()
+    l1_loss = nn.L1Loss().to(device) # .to(device) 추가
 
     # --- 데이터셋 및 데이터로더 ---
     try:
@@ -242,6 +284,7 @@ def main():
                 image_folder_name=eval_cfg.get('eval_image_folder_name', 'Imgs'),
                 mask_folder_name=eval_cfg.get('eval_mask_folder_name', 'GT'),
                 clip_len=common_cfg.get('clip_len', 8),
+                # 해상도도 cfg.train에서 읽어오도록 통일
                 resolution=train_cfg_temp.get('resolution', (224, 224)),
                 is_train=False, use_augmentation=False
             )
@@ -251,7 +294,7 @@ def main():
 
     # collate_fn
     def collate_fn(batch):
-        batch = list(filter(lambda x: x is not None and len(x)==3, batch))
+        batch = list(filter(lambda x: x is not None and isinstance(x,tuple) and len(x)==3, batch))
         if not batch: return None, None, None
         try: return torch.utils.data.dataloader.default_collate(batch)
         except Exception as e: logger.warning(f"Eval collate error, skip batch: {e}"); return None, None, None
@@ -287,11 +330,17 @@ def main():
                 # 1. SOD Metrics
                 predicted_masks_flat_eval = rearrange(predicted_masks_seq, 'b t c h w -> (b t) c h w')
                 masks_flat_target_eval = ground_truth_masks.view(b*t, 1, h, w)
-                preds_np = (predicted_masks_flat_eval.cpu().numpy() * 255).astype(np.uint8)
-                gts_np = (masks_flat_target_eval.cpu().numpy() > 0.5).astype(np.uint8) * 255
+                
+                # .cpu() 호출을 루프 밖으로 이동하여 오버헤드 감소
+                preds_np_batch = (predicted_masks_flat_eval.cpu().numpy() * 255).astype(np.uint8)
+                gts_np_batch = (masks_flat_target_eval.cpu().numpy() > 0.5).astype(np.uint8) * 255
+
                 for i in range(b*t):
-                    pred_mask_uint8 = preds_np[i].squeeze(); gt_mask_uint8 = gts_np[i].squeeze()
-                    if gt_mask_uint8.max() > 0: metrics.step(pred=pred_mask_uint8, gt=gt_mask_uint8)
+                    pred_mask_uint8 = preds_np_batch[i].squeeze()
+                    gt_mask_uint8 = gts_np_batch[i].squeeze()
+                    # GT가 비어있지 않은 경우에만 메트릭 계산
+                    if gt_mask_uint8.max() > 0: 
+                        metrics.step(pred=pred_mask_uint8, gt=gt_mask_uint8)
 
                 # 2. Enhancement L1 Loss
                 use_enhancement_eval = reconstructed_images_flat is not None and eval_cfg.get('calculate_enhancement_loss', True)
@@ -304,16 +353,18 @@ def main():
 
                 # 3. Warping Error
                 if t > 1 and calculate_warping_error and raft_model is not None:
-                    # ... (Warping Error 계산 로직, 이전 코드와 동일) ...
                     try:
                         img1_batch_we = video_clip[:, :-1].reshape(-1, c, h, w)
                         img2_batch_we = video_clip[:, 1:].reshape(-1, c, h, w)
                         if not torch.equal(img1_batch_we, img2_batch_we):
                             img1_tf_we, img2_tf_we = raft_transforms(img1_batch_we, img2_batch_we)
+                            # RAFT forward는 no_grad() 컨텍스트 내에서도 명시적으로 no_grad() 추가 (메모리 절약)
                             with torch.no_grad():
                                 flows_we = raft_model(img1_tf_we.contiguous(), img2_tf_we.contiguous())[-1]
+                            
                             flows_rs_we = F.interpolate(flows_we, size=(h, w), mode='bilinear', align_corners=False)
                             flows_un_we = flows_rs_we.view(b, t - 1, 2, h, w)
+                            
                             batch_temporal_error_sum = 0.0; valid_comps = 0
                             for frame_idx in range(t - 1):
                                 flow_i_we = flows_un_we[:, frame_idx]
@@ -321,13 +372,23 @@ def main():
                                 grid_we = torch.stack((grid_x_we, grid_y_we), 2).float()
                                 disp_we = flow_i_we.permute(0, 2, 3, 1)
                                 w_grid_we = grid_we + disp_we
-                                w_grid_we[..., 0]=2.0*w_grid_we[..., 0]/(w-1)-1.0; w_grid_we[..., 1]=2.0*w_grid_we[..., 1]/(h-1)-1.0
-                                mask_t_s = predicted_masks_seq[:, frame_idx]; mask_tp1_s = predicted_masks_seq[:, frame_idx+1]
+                                w_grid_we[..., 0]=2.0*w_grid_we[..., 0]/(w-1)-1.0
+                                w_grid_we[..., 1]=2.0*w_grid_we[..., 1]/(h-1)-1.0
+                                
+                                mask_t_s = predicted_masks_seq[:, frame_idx]
+                                mask_tp1_s = predicted_masks_seq[:, frame_idx+1]
                                 mask_t_w = grid_sample(mask_t_s, w_grid_we, mode='bilinear', padding_mode='border', align_corners=False)
+                                
                                 step_err = l1_loss(mask_t_w, mask_tp1_s).item()
+                                
                                 if not np.isnan(step_err) and not np.isinf(step_err):
-                                     batch_temporal_error_sum += step_err * b; valid_comps += b
-                            if valid_comps > 0: total_warping_error += batch_temporal_error_sum; temporal_comparison_count += valid_comps
+                                     batch_temporal_error_sum += step_err * b # 배치 크기(b) 곱하기
+                                     valid_comps += b
+                                     
+                            if valid_comps > 0: 
+                                total_warping_error += batch_temporal_error_sum
+                                temporal_comparison_count += valid_comps
+                                
                     except Exception as e_we: logger.warning(f"Eval: Warping Error calc failed: {e_we}. Skip for batch.")
 
             except Exception as e_metric: logger.error(f"Eval: Metric calculation error: {e_metric}. Skip batch metrics.")
