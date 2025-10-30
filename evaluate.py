@@ -51,7 +51,7 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg):
     if num_samples_available < 1:
         logger.warning("Dataset empty, skipping visualization.")
         return
-    num_samples_to_check = min(5, num_samples_available)
+    num_samples_to_check = min(20, num_samples_available)
 
     random_subset_indices = random.sample(range(num_samples_available), num_samples_to_check)
     actual_indices = [indices_to_sample_from[i] for i in random_subset_indices]
