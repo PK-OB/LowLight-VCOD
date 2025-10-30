@@ -1,340 +1,404 @@
 # utils/py_sod_metrics.py
-
-import os
-from collections import defaultdict
+# (Bug Fix 3: OpenCV dtype 오류 수정)
 
 import numpy as np
-import cv2
-from scipy.ndimage import convolve, distance_transform_edt as bwdist
-from skimage.morphology import disk, ball
+from scipy.ndimage import convolve
+from scipy.ndimage.filters import gaussian_filter
+import cv2  # <-- [BUG FIX 2] cv2 임포트 추가
+from PIL import Image # <-- [BUG FIX 2] Image 임포트 추가 (shape 다를 때 대비)
 
-"""
-A Python implementation of the metrics for Salient Object Detection.
-"""
-
-
-def _prepare_data(pred: np.ndarray, gt: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, float]:
-    gt = gt > 0
-    pred = pred / 255
-    if pred.max() != pred.min():
-        pred = (pred - pred.min()) / (pred.max() - pred.min())
-    return pred, gt
-
-
-class MAE:
+class SODMetrics:
     def __init__(self):
-        self.prediction = []
-        self.ground_truth = []
+        self.metric_calculators = [
+            MAE(),
+            Emeasure(),
+            Smeasure(),
+            WeightedFmeasure(),
+            Fmeasure(),
+            # ... 다른 지표 추가 가능
+        ]
+        self.results = None
 
     def step(self, pred: np.ndarray, gt: np.ndarray):
-        pred, gt = _prepare_data(pred, gt)
+        """
+        하나의 예측/정답 쌍에 대해 모든 지표 계산을 수행합니다.
+        :param pred: [0, 255] 범위의 uint8 numpy 배열 (예측 마스크)
+        :param gt: [0, 255] 범위의 uint8 numpy 배열 (정답 마스크)
+        """
+        if pred.dtype != np.uint8:
+            pred = (pred * 255).astype(np.uint8)
+        if gt.dtype != np.uint8:
+            gt = (gt * 255).astype(np.uint8)
+            
+        if pred.shape != gt.shape:
+            # [BUG FIX 2] PIL.Image를 사용하도록 수정 (cv2 의존성 줄임)
+            pred = np.array(Image.fromarray(pred).resize(gt.shape[::-1]))
 
-        self.prediction.append(pred)
-        self.ground_truth.append(gt)
+        for calculator in self.metric_calculators:
+            calculator.step(pred, gt)
 
     def get_results(self) -> dict:
-        prediction = np.array(self.prediction)
-        ground_truth = np.array(self.ground_truth)
-        abs_error = np.abs(prediction - ground_truth)
-        overall_mae = np.mean(abs_error)
-        return {"MAE": overall_mae}
+        """
+        모든 지표의 최종 평균 결과를 반환합니다.
+        :return: 지표 이름을 키로, 평균값을 값으로 하는 딕셔너리
+        """
+        if self.results is None:
+            self.results = {}
+            for calculator in self.metric_calculators:
+                self.results.update(calculator.get_results())
+        return self.results
+
+# ==========================================================
+# 내부 지표 계산기 클래스 (Base, MAE, F-measure, E-measure 등)
+# ==========================================================
+
+class _BaseMetric:
+    """
+    모든 지표 계산기의 기본 클래스.
+    """
+    def __init__(self):
+        self.num_samples = 0
+        self.total_value = 0
+        self.total_values = [] # E-measure, F-measure 등 곡선용
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        raise NotImplementedError
+
+    def get_results(self) -> dict:
+        raise NotImplementedError
+
+    def _prepare_data(self, pred: np.ndarray, gt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        데이터를 전처리하는 공통 함수.
+        pred: [0, 255] uint8
+        gt: [0, 255] uint8
+        """
+        gt = gt > 128 # GT는 0.5 (128) 기준으로 이진화
+        pred = pred / 255.0 # Pred는 [0, 1] float로
+        
+        # ▼▼▼ [치명적 오류 수정] ▼▼▼
+        # 이 재정규화 로직은 Saliency Map의 절대적인 자신감을 무시하고
+        # [0, 0.1] 범위의 희미한 예측도 [0, 1]로 강제 스트레칭하여
+        # 지표를 심각하게 왜곡시킵니다.
+        
+        # if pred.max() != pred.min(): # <-- 주석 처리 (BUG FIX 1)
+        #     pred = (pred - pred.min()) / (pred.max() - pred.min()) # <-- 주석 처리 (BUG FIX 1)
+        # ▲▲▲ [수정 완료] ▲▲▲
+            
+        return pred, gt
 
 
-class Fmeasure:
-    def __init__(self, beta: float = 0.3):
-        self.beta = beta
+class MAE(_BaseMetric):
+    """
+    Mean Absolute Error (MAE)
+    """
+    def __init__(self):
+        super(MAE, self).__init__()
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = self._prepare_data(pred, gt)
+        mae = np.mean(np.abs(pred - gt))
+        self.total_value += mae
+        self.num_samples += 1
+
+    def get_results(self) -> dict:
+        avg_mae = self.total_value / self.num_samples if self.num_samples > 0 else 0
+        return {"MAE": avg_mae}
+
+
+class Fmeasure(_BaseMetric):
+    """
+    F-measure (Precision, Recall, F-beta)
+    """
+    def __init__(self, beta2=0.3): # 0.3은 S-measure와 동일한 설정
+        super(Fmeasure, self).__init__()
+        self.beta2 = beta2
+        self.adaptive_f_results = []
         self.precisions = []
         self.recalls = []
-        self.adaptive_fms = []
-        self.mean_fms = []
 
     def step(self, pred: np.ndarray, gt: np.ndarray):
-        pred, gt = _prepare_data(pred=pred, gt=gt)
+        pred, gt = self._prepare_data(pred, gt)
+        gt_size = gt.sum()
+        if gt_size == 0:
+            # GT가 비어있으면 이 샘플은 무시 (또는 1.0 처리)
+            # 여기서는 일관성을 위해 무시
+            return
 
-        adaptive_fm = self.cal_adaptive_fm(pred, gt)
-        self.adaptive_fms.append(adaptive_fm)
+        # 1. Adaptive F-measure (adpFm)
+        adaptive_threshold = 2 * pred.mean()
+        if adaptive_threshold > 1.0:
+            adaptive_threshold = 1.0
+        
+        binary_pred_adaptive = (pred >= adaptive_threshold)
+        tp_adaptive = (binary_pred_adaptive & gt).sum()
+        
+        precision_adaptive = tp_adaptive / (binary_pred_adaptive.sum() + 1e-12)
+        recall_adaptive = tp_adaptive / (gt_size + 1e-12)
+        
+        f_beta_adaptive = (1 + self.beta2) * (precision_adaptive * recall_adaptive) / (self.beta2 * precision_adaptive + recall_adaptive + 1e-12)
+        self.adaptive_f_results.append(f_beta_adaptive)
 
-        precisions, recalls = self.cal_pr(pred, gt)
-        self.precisions.append(precisions)
-        self.recalls.append(recalls)
+        # 2. Precision-Recall Curve (Max F-measure용)
+        thresholds = np.linspace(0, 1, 256)
+        sample_precisions = []
+        sample_recalls = []
 
-    def cal_adaptive_fm(self, pred, gt):
-        # According to the original paper, the mean of the saliency map is used as the threshold.
-        # However, the performance of this method is not stable, so we use the F-measure of the mean of the GT.
-        # The implementation of the F-measure of the mean of the GT is referenced from
-        # https://github.com/DengPingFan/CODToolbox/blob/master/Evaluation/eval-dataset(Image-level)/MAIN_Metric.m#L199
-        threshold = 2 * pred.mean()
-        if threshold > 1:
-            threshold = 1
-        binary_pred = pred >= threshold
-        area_intersection = np.sum(binary_pred[gt])
-        area_pred = np.sum(binary_pred)
-        area_gt = np.sum(gt)
-        precision = area_intersection / (area_pred + 1e-6)
-        recall = area_intersection / (area_gt + 1e-6)
-        adaptive_fm = (1 + self.beta) * precision * recall / (self.beta * precision + recall + 1e-6)
-        return adaptive_fm
+        for th in thresholds:
+            binary_pred = (pred >= th)
+            tp = (binary_pred & gt).sum()
+            
+            precision = tp / (binary_pred.sum() + 1e-12)
+            recall = tp / (gt_size + 1e-12)
+            
+            sample_precisions.append(precision)
+            sample_recalls.append(recall)
 
-    def cal_pr(self, pred, gt):
-        # calculate precision and recall at 255 different thresholds
-        pred = (pred * 255).astype(np.uint8)
-        thresholds = np.linspace(0, 255, 256)
-        precisions = np.zeros(256)
-        recalls = np.zeros(256)
-        for i, threshold in enumerate(thresholds):
-            binary_pred = pred >= threshold
-            area_intersection = np.sum(binary_pred[gt])
-            area_pred = np.sum(binary_pred)
-            area_gt = np.sum(gt)
-
-            precision = area_intersection / (area_pred + 1e-6)
-            recall = area_intersection / (area_gt + 1e-6)
-
-            precisions[i] = precision
-            recalls[i] = recall
-        return precisions, recalls
+        self.precisions.append(np.array(sample_precisions))
+        self.recalls.append(np.array(sample_recalls))
+        self.num_samples += 1
 
     def get_results(self) -> dict:
-        adaptive_fm = np.mean(np.array(self.adaptive_fms, dtype=np.float64))
-        precisions = np.mean(np.array(self.precisions, dtype=np.float64), axis=0)
-        recalls = np.mean(np.array(self.recalls, dtype=np.float64), axis=0)
-        mean_fm = (1 + self.beta) * precisions * recalls / (self.beta * precisions + recalls + 1e-6)
+        if self.num_samples == 0:
+            return {"adpFm": 0, "maxFm": 0, "avgP": 0, "avgR": 0}
+
+        # 1. Adaptive F-measure
+        avg_adpfm = np.mean(np.array(self.adaptive_f_results))
+
+        # 2. Max F-measure
+        avg_precision_curve = np.mean(np.stack(self.precisions, axis=0), axis=0)
+        avg_recall_curve = np.mean(np.stack(self.recalls, axis=0), axis=0)
+
+        f_betas = (1 + self.beta2) * (avg_precision_curve * avg_recall_curve) / (self.beta2 * avg_precision_curve + avg_recall_curve + 1e-12)
+        
+        max_fm = np.max(f_betas)
+        
         return {
-            "adaptive_F-beta": adaptive_fm,
-            "mean_F-beta": mean_fm.max(),
-            "precisions": precisions,
-            "recalls": recalls,
+            "adpFm": avg_adpfm,
+            "maxFm": max_fm,
+            "avgP": np.mean(avg_precision_curve), # 참고용
+            "avgR": np.mean(avg_recall_curve)   # 참고용
         }
 
 
-class Smeasure:
-    def __init__(self, alpha: float = 0.5):
+class WeightedFmeasure(Fmeasure):
+    """
+    Weighted F-measure
+    """
+    def __init__(self, beta2=1.0): # F-measure 논문 기본값은 1.0
+        super(WeightedFmeasure, self).__init__(beta2=beta2)
+        self.weighted_f_results = []
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = self._prepare_data(pred, gt)
+        
+        if gt.sum() == 0:
+            # GT가 비어있으면, 1-pred의 평균 (배경을 잘 예측했는지)
+            wfm = np.mean(1 - pred)
+            self.weighted_f_results.append(wfm)
+        else:
+            # "Enhanced-alignment measure for binary foreground map evaluation" (2014)
+            # 논문 저자 코드를 기반으로 한 구현
+            
+            # 1. 픽셀 가중치 계산 (GT 기준)
+            # [BUG FIX 2] cv2 함수를 사용
+            dst = cv2.distanceTransform((gt * 255).astype(np.uint8), cv2.DIST_L2, 0)
+            bw = (dst == 0) # GT 영역
+            
+            # 가중치 맵 w
+            w = np.ones_like(gt) * 5.0 # 기본 가중치
+            
+            # ▼▼▼ [BUG FIX 3] OpenCV dtype 오류 수정 ▼▼▼
+            # 1. dst를 float64로 변환 (Laplacian 입력/출력 타입 일치)
+            dst_64f = dst.astype(np.float64) 
+            # 2. float64 입력으로 Laplacian 계산
+            lap = cv2.Laplacian(dst_64f, cv2.CV_64F)
+            # ▲▲▲ [수정 완료] ▲▲▲
+            
+            # 라플라시안 계산 시 0으로 나누는 오류 방지
+            lap[bw] = 1.0 # 0이 되는 것을 방지 (어차피 아래에서 덮어쓰므로)
+            
+            w_bw = 1 + (dst[bw] / lap[bw])
+            # w_bw 값이 무한대가 되거나 너무 큰 경우를 대비 (안정성)
+            w_bw[lap[bw] == 0] = 1.0 
+            
+            w[bw] = w_bw
+
+            # 2. Weighted Precision/Recall
+            tp_matrix = w * (pred * gt) # 가중치가 적용된 TP
+            
+            precision_num = tp_matrix.sum()
+            precision_den = (w * pred).sum() + 1e-12
+            
+            recall_num = tp_matrix.sum()
+            recall_den = (w * gt).sum() + 1e-12
+            
+            precision = precision_num / precision_den
+            recall = recall_num / recall_den
+
+            # 3. Weighted F-measure
+            wfm = (1 + self.beta2) * (precision * recall) / (self.beta2 * precision + recall + 1e-12)
+            self.weighted_f_results.append(wfm)
+            
+        self.num_samples += 1
+
+    def get_results(self) -> dict:
+        avg_wfm = np.mean(np.array(self.weighted_f_results)) if self.num_samples > 0 else 0
+        return {"wFm": avg_wfm}
+
+
+class Emeasure(_BaseMetric):
+    """
+    Enhanced-alignment measure (E-measure)
+    """
+    def __init__(self):
+        super(Emeasure, self).__init__()
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = self._prepare_data(pred, gt)
+        
+        # 256개 임계값에 대한 E-measure 곡선 계산
+        thresholds = np.linspace(0, 1, 256)
+        sample_ems = []
+        
+        for th in thresholds:
+            if th == 0 or th == 1: # 양 끝값 제외
+                continue
+                
+            # Alignment Term 계산
+            binary_pred = (pred >= th).astype(np.float64)
+            mu_pred = np.mean(binary_pred)
+            mu_gt = np.mean(gt)
+            
+            align_matrix = 2 * (mu_pred * mu_gt) / (mu_pred**2 + mu_gt**2 + 1e-12)
+            
+            # Enhanced Alignment Term
+            phi = (binary_pred - mu_pred) * (gt - mu_gt)
+            phi_numerator = (phi + 1)**2 / 4 # (0~1)
+            
+            # [BUG FIX 2] 분모 안정성 강화
+            mean_pred_sq = np.mean((binary_pred - mu_pred)**2)
+            mean_gt_sq = np.mean((gt - mu_gt)**2)
+            phi_denominator = mean_pred_sq + mean_gt_sq + 1e-12
+            
+            enhanced_align_matrix = phi_numerator / phi_denominator
+            
+            em = np.mean(align_matrix * enhanced_align_matrix)
+            sample_ems.append(em)
+
+        self.total_values.append(np.array(sample_ems))
+        self.num_samples += 1
+
+    def get_results(self) -> dict:
+        if self.num_samples == 0:
+            return {"Em": 0}
+        
+        # 전체 데이터셋에 대한 평균 곡선
+        avg_em_curve = np.mean(np.stack(self.total_values, axis=0), axis=0)
+        max_em = np.max(avg_em_curve) # 최대값 (Em)
+        
+        return {"Em": max_em}
+
+
+class Smeasure(_BaseMetric):
+    """
+    Structural measure (S-measure)
+    """
+    def __init__(self, alpha=0.5):
+        super(Smeasure, self).__init__()
         self.alpha = alpha
-        self.scores = []
 
     def step(self, pred: np.ndarray, gt: np.ndarray):
-        pred, gt = _prepare_data(pred=pred, gt=gt)
-
-        y = np.mean(gt)
-        if y == 0:
-            score = 1 - np.mean(pred)
-        elif y == 1:
-            score = np.mean(pred)
-        else:
-            score = self.alpha * self.object(pred, gt) + (1 - self.alpha) * self.region(pred, gt)
-        self.scores.append(score)
-
-    def object(self, pred, gt):
-        fg = pred * gt
-        bg = (1 - pred) * (1 - gt)
-
-        u = np.mean(gt)
-        return u * self.s_object(fg, gt) + (1 - u) * self.s_object(bg, 1 - gt)
-
-    def s_object(self, pred, gt):
-        x = np.mean(pred[gt])
-        sigma_x = np.std(pred[gt])
-        return 2 * x / (x ** 2 + 1 + sigma_x + 1e-6)
-
-    def region(self, pred, gt):
-        x, y = self.centroid(gt)
-        w, h = gt.shape
-        if x == -1 and y == -1:
-            return 0
+        pred, gt = self._prepare_data(pred, gt)
         
-        # pred_block: a block of the prediction, the center of the block is the center of the gt
-        # gt_block: a block of the gt, the center of the block is the center of the gt
-        # the size of the block is (2 * x, 2 * y)
-        x, y = int(x), int(y)
-        x_min, x_max = max(0, 2 * x - w), min(2 * x, w)
-        y_min, y_max = max(0, 2 * y - h), min(2 * y, h)
+        gt_fg = (gt > 0)
+        gt_bg = (gt == 0)
 
-        pred_block = pred[y_min:y_max, x_min:x_max]
-        gt_block = gt[y_min:y_max, x_min:x_max]
-        
-        # in case the gt is a line
-        if gt_block.sum() == 0:
-            return 0
-
-        # number of foreground pixels in the gt_block
-        block_fg = gt_block.sum()
-        # number of background pixels in the gt_block
-        block_bg = gt_block.size - block_fg
-        
-        # calculate the mean of the pred_block for the foreground and background
-        mu_fg = np.mean(pred_block[gt_block])
-        mu_bg = np.mean(pred_block[~gt_block])
-
-        # calculate the score
-        score = 0
-        if block_fg > 0:
-            score += block_fg / gt_block.size * (1 if mu_fg > mu_bg else -1) * (mu_fg - mu_bg) ** 2
-        if block_bg > 0:
-            score += block_bg / gt_block.size * (1 if mu_fg < mu_bg else -1) * (mu_fg - mu_bg) ** 2
-        
-        return score
-
-    def centroid(self, gt):
-        if np.sum(gt) == 0:
-            return -1, -1
-        
-        # calculate the center of the gt
-        x = np.mean(np.where(gt)[1])
-        y = np.mean(np.where(gt)[0])
-        return x, y
-        
-
-    def get_results(self) -> dict:
-        score = np.mean(np.array(self.scores, dtype=np.float64))
-        return {"S-measure": score}
-
-
-class Emeasure:
-    def __init__(self,):
-        self.scores = []
-
-    def step(self, pred: np.ndarray, gt: np.ndarray):
-        pred, gt = _prepare_data(pred=pred, gt=gt)
-
-        # pred: 2d numpy array of shape (h, w), type float64
-        # gt: 2d numpy array of shape (h, w), type bool
-
-        threshold = 2 * pred.mean()
-        if threshold > 1:
-            threshold = 1
-
-        pred_binary = pred >= threshold
-        
-        # enhanced-alignment measure
-        # Reference: https://github.com/DengPingFan/E-measure/blob/master/E-measure.m
-        
-        # get the enhanced alignment matrix
-        w, h = gt.shape
-        gt_fg = gt.sum()
-        gt_bg = w * h - gt_fg
-
-        align_matrix = np.zeros((w, h))
-        if gt_fg == 0:
-            align_matrix[pred_binary] = 1 - pred_binary[pred_binary]
-        elif gt_bg == 0:
-            align_matrix[pred_binary] = pred_binary[pred_binary]
-        else:
-            pred_fg = pred_binary.sum()
-            pred_bg = w * h - pred_fg
-
-            align_fg = (pred_binary - pred.mean())**2
-            align_bg = (1 - pred_binary - (1-pred).mean())**2
-
-            align_matrix[gt] = align_fg[gt]
-            align_matrix[~gt] = align_bg[~gt]
-        
-        score = np.sum(align_matrix) / (w * h -1 + 1e-6)
-        self.scores.append(score)
-
-
-    def get_results(self) -> dict:
-        score = np.mean(np.array(self.scores, dtype=np.float64))
-        return {"E-measure": score}
-
-
-class WeightedFmeasure:
-    def __init__(self, beta: float = 0.3):
-        self.beta = beta
-        self.weighted_fms = []
-
-    def step(self, pred: np.ndarray, gt: np.ndarray):
-        pred, gt = _prepare_data(pred=pred, gt=gt)
-
-        if np.sum(gt) == 0:
-            self.weighted_fms.append(1 - np.mean(pred))
-            return
-        
-        # Reference: https://github.com/DengPingFan/CODToolbox/blob/master/Evaluation/eval-dataset(Image-level)/MAIN_Metric.m#L274
-        # a weighted F-measure can be calculated as follows:
-        # Fw = (1 + β2) · (Prec · Recall) / (β2 · Prec + Recall)
-        # where the precision and recall are weighted by the pixel’s importance.
-
-        # center-priori
-        # build a disk-like shape gt to calculate the center-priori
-        wc = self.mat_weight(gt)
-
-        # calculate the precision and recall
-        precisions, recalls = self.cal_pr(pred, gt, wc)
-
-        weighted_fm = (1 + self.beta) * precisions * recalls / (self.beta * precisions + recalls + 1e-6)
-        self.weighted_fms.append(weighted_fm)
-
-
-    def cal_pr(self, pred, gt, wc):
-        pred = (pred * 255).astype(np.uint8)
-        thresholds = np.linspace(0, 255, 256)
-        precisions = np.zeros(256)
-        recalls = np.zeros(256)
-        for i, threshold in enumerate(thresholds):
-            binary_pred = pred >= threshold
+        # 1. Object-aware S-measure (So)
+        s_object = 0
+        if gt_fg.sum() > 0:
+            pred_fg = pred[gt_fg]
+            mu_pred_fg = np.mean(pred_fg)
+            sigma_pred_fg = np.std(pred_fg)
             
-            # number of true positive pixels
-            # according to https://github.com/DengPingFan/CODToolbox/blob/master/Evaluation/eval-dataset(Image-level)/script/Onekey-Evaluate-function/Evaluate_COD_Metrics.m#L159
-            # the true positive pixels are the intersection of the binary prediction and the ground truth
-            tp = binary_pred * gt
+            # 구조적 유사도 (x)
+            s_x = 2 * mu_pred_fg / (mu_pred_fg**2 + 1 + 1e-12) # GT의 mu는 1.0
+            # 분포 유사도 (y)
+            # [BUG FIX 2] sigma_gt가 0이므로 s_y 계산 수정
+            s_y = 2 * (sigma_pred_fg * 0) / (sigma_pred_fg**2 + 0**2 + 1e-12)
+            # S-Measure 논문 저자 코드는 다음을 사용함:
+            if sigma_pred_fg == 0:
+                s_y = 1.0 if mu_pred_fg == 0 else 0.0 # GT(0)와 sigma가 같음
+            else:
+                s_y = 2 * sigma_pred_fg * 0 / (sigma_pred_fg**2 + 1e-12) # 0
             
-            # according to https://github.com/DengPingFan/CODToolbox/blob/master/Evaluation/eval-dataset(Image-level)/script/Onekey-Evaluate-function/Evaluate_COD_Metrics.m#L164
-            # the precision is the sum of the weighted true positive pixels divided by the sum of the binary prediction
-            precision = np.sum(wc[tp]) / (np.sum(binary_pred) + 1e-6)
-            recall = np.sum(wc[tp]) / (np.sum(wc[gt]) + 1e-6)
-            precisions[i] = precision
-            recalls[i] = recall
-        return precisions, recalls
+            # S-Measure 원본 논문(2017)의 Eq. (4)
+            sigma_cross = np.mean((pred_fg - mu_pred_fg) * (1.0 - 1.0)) # 0
+            s_y = (2 * sigma_cross + 1e-12) / (sigma_pred_fg**2 + 0**2 + 1e-12) # 0
+            # 저자 MATLAB 코드는 이진 GT(mu=1, std=0)에 대해 다르게 처리함
+            # mu_x*mu_y*2 / (mu_x^2 + mu_y^2)
+            # std_x*std_y*2 / (std_x^2 + std_y^2)
+            
+            # 여기서는 mu=1, std=0 인 GT와의 유사도를 직접 계산
+            mu_gt_fg = 1.0
+            sigma_gt_fg = 0.0
+            
+            s_x = (2 * mu_pred_fg * mu_gt_fg + 1e-12) / (mu_pred_fg**2 + mu_gt_fg**2 + 1e-12)
+            s_y = (2 * sigma_pred_fg * sigma_gt_fg + 1e-12) / (sigma_pred_fg**2 + sigma_gt_fg**2 + 1e-12)
+            
+            s_object = self.alpha * s_x + (1 - self.alpha) * s_y
+            
+            if np.isnan(s_object):
+                # 단일 값 픽셀 등 예외 처리
+                s_object = 1.0 if mu_pred_fg > 0.5 else 0.0
 
+        # 2. Region-aware S-measure (Sr)
+        # 4개의 영역 (GT=1, P>T), (GT=0, P<=T), (GT=1, P<=T), (GT=0, P>T)
+        pred_mean = pred.mean()
+        pred_fg_reg = (pred > pred_mean)
+        pred_bg_reg = (pred <= pred_mean)
+        
+        gt_fg_reg = gt_fg
+        gt_bg_reg = gt_bg
 
-    def mat_weight(self, gt, ksize=5):
-        # build a disk-like shape gt to calculate the center-priori
-        # the shape of the disk is determined by the ksize
-        # the center of the disk is the center of the gt
-        # the value of the disk is determined by the distance from the center
-        # the closer to the center, the larger the value
+        # 픽셀 수
+        w1 = (gt_fg_reg & pred_fg_reg).sum()
+        w2 = (gt_bg_reg & pred_bg_reg).sum()
+        w3 = (gt_fg_reg & pred_bg_reg).sum()
+        w4 = (gt_bg_reg & pred_fg_reg).sum()
         
-        # in case the gt is a line
-        if np.sum(gt) == 0:
-            return np.zeros_like(gt)
+        total_w = w1 + w2 + w3 + w4
         
-        # distance transform
-        # the distance transform is the distance from the pixel to the nearest background pixel
-        # the distance is calculated by the Euclidean distance
-        # the background is the pixels with value 0
-        # the foreground is the pixels with value 1
-        d = bwdist(gt==0)
-        d[d > ksize] = ksize
-        d = d / ksize
-        return d
+        # 영역 가중치
+        w1 /= (total_w + 1e-12)
+        w2 /= (total_w + 1e-12)
+        w3 /= (total_w + 1e-12)
+        w4 /= (total_w + 1e-12)
         
+        # 영역 유사도
+        s1 = 1.0 # (GT=1, P=1)
+        s2 = 1.0 # (GT=0, P=0)
+        
+        # [BUG FIX 2] 영역이 0일 경우 NaN 방지
+        pred_w3 = pred[gt_fg_reg & pred_bg_reg]
+        s3 = np.mean(pred_w3) if pred_w3.size > 0 else 0 # (GT=1, P=0)
+        
+        pred_w4 = pred[gt_bg_reg & pred_fg_reg]
+        s4 = 1.0 - np.mean(pred_w4) if pred_w4.size > 0 else 1 # (GT=0, P=1)
+        
+        # S-region
+        s_region = w1*s1 + w2*s2 + w3*s3 + w4*s4
+
+        # 3. S-measure
+        sm = 0.5 * s_object + 0.5 * s_region # 논문에서는 0.5:0.5 사용
+        
+        if np.isnan(sm):
+            # GT가 아예 비어있는 경우 등
+            sm = 1.0 - pred_mean # 배경 예측 점수
+
+        self.total_value += sm
+        self.num_samples += 1
+
     def get_results(self) -> dict:
-        weighted_fms = np.mean(np.array(self.weighted_fms, dtype=np.float64), axis=0)
-        return {"weighted_F-beta": weighted_fms.max()}
-
-
-class SODMetrics:
-    def __init__(self, ):
-        self.metrics = [MAE(), Fmeasure(), Smeasure(), Emeasure(), WeightedFmeasure()]
-
-    def step(self, pred: np.ndarray, gt: np.ndarray):
-        assert pred.shape == gt.shape, f"pred.shape: {pred.shape}, gt.shape: {gt.shape}"
-        assert pred.dtype == np.uint8, f"pred.dtype: {pred.dtype}"
-        assert gt.dtype == np.uint8, f"gt.dtype: {gt.dtype}"
-        
-        for metric in self.metrics:
-            metric.step(pred, gt)
-    
-    def get_results(self) -> dict:
-        results = {}
-        for metric in self.metrics:
-            results.update(metric.get_results())
-        
-        # rename keys
-        results["Sm"] = results.pop("S-measure")
-        results["wFm"] = results.pop("weighted_F-beta")
-        results["adpFm"] = results.pop("adaptive_F-beta")
-        results["Em"] = results.pop("E-measure")
-        results["F-beta"] = results.pop("mean_F-beta")
-
-        return results
+        avg_sm = self.total_value / self.num_samples if self.num_samples > 0 else 0
+        return {"Sm": avg_sm}

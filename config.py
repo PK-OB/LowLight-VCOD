@@ -25,7 +25,7 @@ class Config:
         
         # --- 학습 하이퍼파라미터 (Transformer용 조정 예시) ---
         'epochs': 5000, # Transformer는 더 많은 에포크 필요할 수 있음
-        'batch_size': 24, # Transformer는 메모리 더 많이 사용 -> 배치 크기 줄이기
+        'batch_size': 16, # Transformer는 메모리 더 많이 사용 -> 배치 크기 줄이기
         'val_batch_size': 16, # 검증 시에는 더 큰 배치 사용 가능
         'lr': 1e-5,          # 학습률 낮추기
         'weight_decay': 0.05, # Weight Decay 높이기
@@ -61,20 +61,20 @@ class Config:
     # --- 평가 설정 ---
     evaluate = {
         'experiment': 'proposed',
-        'batch_size': 8,
-        'visualization_path': '1029_1824_correctedData_COD10K.png', # (저장 경로 예시)
-        'checkpoint_path': 'checkpoints/1029_1824_correctedData.pth', #           (평가할 모델 경로)
+        'batch_size': 2,
+        'visualization_path': 'evaluation_results/1030_1746_CHAMELEON2.png', # (저장 경로 예시)
+        'checkpoint_path': 'checkpoints/1030_1746.pth', #           (평가할 모델 경로)
 
         # ▼▼▼ 1. 여기에 새로운 설정을 추가합니다 ▼▼▼
         # -----------------------------------------------------------------
         'eval_dataset_type': 'folder',  # 'folder' 또는 'moca_csv' (기본값)
         
         # 'folder' 타입을 사용할 경우
-        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/COD10K_Night', # <-- 여기에 새 테스트셋 경로 입력!
+        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/CHAMELEON_Night', # <-- 여기에 새 테스트셋 경로 입력!
         
         # ▼▼▼ 수정된 부분 ▼▼▼
         # (평가 시에도 원본 주간 이미지가 필요합니다. Test_Night의 원본 경로로 수정해주세요)
-        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/COD10K',
+        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/CHAMELEON',
         # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         
         'eval_image_folder_name': 'Imgs',
