@@ -109,6 +109,10 @@ class FolderImageMaskDataset(Dataset):
         return len(self.clips)
 
     # ▼▼▼ [수정] Albumentations 파이프라인 + 오류 수정 로직 적용 ▼▼▼
+    # [datasets/folder_mask_dataset.py] 파일의
+# __getitem__ 함수 (def __getitem__(self, idx): 부터 return ... 까지)
+# 전체를 아래 내용으로 교체하세요.
+
     def __getitem__(self, idx):
         image_paths, mask_paths = self.clips[idx]
         
@@ -136,13 +140,12 @@ class FolderImageMaskDataset(Dataset):
             for t in range(self.clip_len):
                 night_t, mask_t, day_t = images_night_np[t], images_mask_np[t], images_day_np[t]
 
-                # ▼▼▼ [FIX] Shape 불일치 해결: 증강 전 크기 강제 일치 ▼▼▼
+                # [FIX] Shape 불일치 해결: 증강 전 크기 강제 일치
                 night_h, night_w = night_t.shape[:2]
                 if mask_t.shape[:2] != (night_h, night_w):
                     mask_t = cv2.resize(mask_t, (night_w, night_h), interpolation=cv2.INTER_NEAREST)
                 if day_t.shape[:2] != (night_h, night_w):
                     day_t = cv2.resize(day_t, (night_w, night_h), interpolation=cv2.INTER_LINEAR)
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
                 if self.is_train and self.use_augmentation:
                     # 3-1. 기하학적 + 가려짐 (클립 전체에 일관되게 적용)
@@ -171,65 +174,35 @@ class FolderImageMaskDataset(Dataset):
                 night_tensor = self.final_transform_night(image=aug_night_list[t])['image']
                 
                 # 4-2. 마스크 (Resize(Nearest) + ToTensor(manual))
-                # ▼▼▼ [FIX] 'mask_resized_np'는 이제 NumPy 배열임 (이름 일치) ▼▼▼
                 mask_resized_np = self.final_transform_mask(image=aug_mask_list[t])['image']
-                # ToTensorV2가 없으므로 from_numpy가 올바르게 작동함
                 mask_tensor = torch.from_numpy(mask_resized_np).float().unsqueeze(0) / 255.0
                 
                 # 4-3. 주간 (Resize + ToTensor(manual))
-                # ▼▼▼ [FIX] 'day_resized_np'는 이제 NumPy 배열임 (이름 일치) ▼▼▼
                 day_resized_np = self.final_transform_day(image=aug_day_list[t])['image']
-                # ToTensorV2가 없으므로 from_numpy가 올바르게 작동함
                 day_tensor = torch.from_numpy(day_resized_np.transpose(2, 0, 1)).float() / 255.0
                 
+                # ▼▼▼ [버그 수정 완료] ▼▼▼
                 tensor_night_list.append(night_tensor)
-                tensor_mask_list.append(tensor_mask_list) # <-- 이런! 여기 버그가 있었네요. 수정합니다.
+                tensor_mask_list.append(mask_tensor) # <-- tensor_mask_list 자신을 추가하던 버그 수정
                 tensor_day_list.append(day_tensor)
+                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
         except FileNotFoundError as e:
             print(f"Warning: File not found, skipping this clip. Details: {e}")
             return None 
         except Exception as e_getitem:
-            # 오류 메시지에 경로를 포함하여 디버깅 용이성 향상
             path_info = image_paths[0] if image_paths else 'N/A'
             print(f"Warning: Error processing clip {idx} (path: {path_info}), skipping. Details: {e_getitem}")
             return None 
 
         # --- 5. 텐서 스택 ---
-        if not tensor_night_list:
+        if not tensor_night_list or not tensor_mask_list or not tensor_day_list:
              return None
              
-        # ▼▼▼ [FIX] 위에서 발견한 버그 수정 (tensor_mask_list를 append) ▼▼▼
-        # (이전 코드: tensor_mask_list.append(tensor_mask_list) -> 재귀 오류 또는 메모리 폭발)
-        # (수정된 코드: 4.2에서 tensor_mask_list.append(mask_tensor) 로 수정되어야 함)
-        
-        # 위 코드 블록 4.2에서 수정을 다시 진행하겠습니다.
-        # 
-        # --- 4. 최종 변환 (Resize, Normalize, ToTensor) ---
-        tensor_night_list, tensor_mask_list, tensor_day_list = [], [], []
-
-        for t in range(self.clip_len):
-            # 4-1. 야간 (Resize + Normalize + ToTensor)
-            night_tensor = self.final_transform_night(image=aug_night_list[t])['image']
-
-            # 4-2. 마스크 (Resize(Nearest) + ToTensor(manual))
-            mask_resized_np = self.final_transform_mask(image=aug_mask_list[t])['image']
-            mask_tensor = torch.from_numpy(mask_resized_np).float().unsqueeze(0) / 255.0
-
-            # 4-3. 주간 (Resize + ToTensor(manual))
-            day_resized_np = self.final_transform_day(image=aug_day_list[t])['image']
-            day_tensor = torch.from_numpy(day_resized_np.transpose(2, 0, 1)).float() / 255.0
-
-            tensor_night_list.append(night_tensor)
-            tensor_mask_list.append(mask_tensor) # <-- [정정] 여기가 올바른 수정입니다.
-            tensor_day_list.append(day_tensor)
-
-        # --- 5. 텐서 스택 (이제 안전함) ---
         image_clip = torch.stack(tensor_night_list, dim=0)
         mask_clip = torch.stack(tensor_mask_list, dim=0)
         original_image_clip = torch.stack(tensor_day_list, dim=0)
         
-        return image_clip, mask_clip, original_image_clip # 3개 항목 반환
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        return image_clip, mask_clip, original_image_clip
     
     

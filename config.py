@@ -48,12 +48,12 @@ class Config:
         'structure_weight': 1.0,  # Structure Loss 가중치
         
         # --- 기타 ---
-        'use_cutmix': True, # Transformer 학습 초기에는 비활성화 권장
+        'use_cutmix': False, # Transformer 학습 초기에는 비활성화 권장
         'cutmix_beta': 1.0,
         'cutmix_prob': 0.5,
         'checkpoint_dir': 'checkpoints',
         'log_dir': 'logs',
-        'checkpoint_name': '1103_1504_aug.pth', # 체크포인트 이름 변경
+        'checkpoint_name': '1104_1429.pth', # 체크포인트 이름 변경
         'debug_image_interval': 10, # 이미지 저장 빈도 조정
         'patience': 100, # Early stopping patience 늘리기 (Transformer 학습 안정화 시간 고려)
     }
@@ -61,7 +61,7 @@ class Config:
     # --- 평가 설정 ---
     evaluate = {
         'experiment': 'proposed',
-        'batch_size': 2,
+        'batch_size': 1,
         'visualization_path': 'evaluation_results/1103_1452_aug_MoCA-Mask.png', # (저장 경로 예시)
         'checkpoint_path': 'checkpoints/1103_1452_aug.pth', #           (평가할 모델 경로)
 
