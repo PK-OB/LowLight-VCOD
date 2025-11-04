@@ -3,9 +3,9 @@
 class Config:
     # --- 공통 설정 ---
     common = {
-        'gpu_ids': '2',
+        'gpu_ids': '0,1,2,3',
         'clip_len': 8,
-        'num_workers': 16,
+        'num_workers': 24,
     }
 
     # --- 학습 설정 ---
@@ -25,8 +25,8 @@ class Config:
         
         # --- 학습 하이퍼파라미터 (Transformer용 조정 예시) ---
         'epochs': 5000, # Transformer는 더 많은 에포크 필요할 수 있음
-        'batch_size': 16, # Transformer는 메모리 더 많이 사용 -> 배치 크기 줄이기
-        'val_batch_size': 16, # 검증 시에는 더 큰 배치 사용 가능
+        'batch_size': 24, # Transformer는 메모리 더 많이 사용 -> 배치 크기 줄이기
+        'val_batch_size': 24, # 검증 시에는 더 큰 배치 사용 가능
         'lr': 1e-5,          # 학습률 낮추기
         'weight_decay': 0.05, # Weight Decay 높이기
         'clip_grad_norm': 1.0, # 그래디언트 클리핑 최대 값
@@ -48,33 +48,33 @@ class Config:
         'structure_weight': 1.0,  # Structure Loss 가중치
         
         # --- 기타 ---
-        'use_cutmix': False, # Transformer 학습 초기에는 비활성화 권장
+        'use_cutmix': True, # Transformer 학습 초기에는 비활성화 권장
         'cutmix_beta': 1.0,
         'cutmix_prob': 0.5,
         'checkpoint_dir': 'checkpoints',
         'log_dir': 'logs',
-        'checkpoint_name': '1030_1746.pth', # 체크포인트 이름 변경
+        'checkpoint_name': '1103_1504_aug.pth', # 체크포인트 이름 변경
         'debug_image_interval': 10, # 이미지 저장 빈도 조정
-        'patience': 50, # Early stopping patience 늘리기 (Transformer 학습 안정화 시간 고려)
+        'patience': 100, # Early stopping patience 늘리기 (Transformer 학습 안정화 시간 고려)
     }
     
     # --- 평가 설정 ---
     evaluate = {
         'experiment': 'proposed',
         'batch_size': 2,
-        'visualization_path': 'evaluation_results/1030_1746_CHAMELEON2.png', # (저장 경로 예시)
-        'checkpoint_path': 'checkpoints/1030_1746.pth', #           (평가할 모델 경로)
+        'visualization_path': 'evaluation_results/1103_1452_aug_MoCA-Mask.png', # (저장 경로 예시)
+        'checkpoint_path': 'checkpoints/1103_1452_aug.pth', #           (평가할 모델 경로)
 
         # ▼▼▼ 1. 여기에 새로운 설정을 추가합니다 ▼▼▼
         # -----------------------------------------------------------------
         'eval_dataset_type': 'folder',  # 'folder' 또는 'moca_csv' (기본값)
         
         # 'folder' 타입을 사용할 경우
-        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/CHAMELEON_Night', # <-- 여기에 새 테스트셋 경로 입력!
+        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night', # <-- 여기에 새 테스트셋 경로 입력!
         
         # ▼▼▼ 수정된 부분 ▼▼▼
         # (평가 시에도 원본 주간 이미지가 필요합니다. Test_Night의 원본 경로로 수정해주세요)
-        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/CHAMELEON',
+        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test',
         # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         
         'eval_image_folder_name': 'Imgs',

@@ -1,28 +1,33 @@
-# pk-ob/jed-vcod/JED-VCOD-cc543b29cefb3a45b940bfd01f42c33af7a6bb25/datasets/folder_mask_dataset.py
+# pk-ob/lowlight-vcod/LowLight-VCOD-1cbc811d7e25b5acb0aa6db157812983363cba26/datasets/folder_mask_dataset.py
+# (▼▼▼ [업그레이드] Albumentations + 오류 수정 (Numpy/Tensor 충돌 및 Shape 불일치) ▼▼▼)
 
 import os
+import cv2 # Albumentations의 보간법 플래그 및 [FIX]용
+import numpy as np
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
+from torchvision import transforms # <-- 최종 텐서 변환을 위해 일부 유지
 import random
 
+# ▼▼▼ [추가] Albumentations 임포트 ▼▼▼
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
 class FolderImageMaskDataset(Dataset):
-    # ▼▼▼ 수정된 부분: 'original_data_root' 인자 추가 ▼▼▼
+    # ▼▼▼ [수정] Albumentations 파이프라인으로 __init__ 업데이트 ▼▼▼
     def __init__(self, root_dir, original_data_root, image_folder_name, mask_folder_name, clip_len=8, resolution=(224, 224), is_train=True, use_augmentation=True):
         self.root_dir = root_dir
-        self.original_data_root = original_data_root # <-- 추가
+        self.original_data_root = original_data_root 
         self.clip_len = clip_len
         self.resolution = resolution
         self.is_train = is_train
         self.use_augmentation = use_augmentation
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
-        # ▼▼▼ 1. 로직 변경: 모든 이미지 경로를 찾는 대신, 클립의 '시작 프레임' 경로만 찾습니다. ▼▼▼
+        
+        # --- 1. 데이터 스캔 (기존과 동일) ---
         self.clips = []
         print(f"Scanning dataset in '{root_dir}' to create video clips...")
-
-        # root_dir 아래의 모든 하위 폴더를 탐색합니다. ('arctic_fox', 'black_cat_1' 등)
         for sub_dir in sorted(os.listdir(root_dir)):
             sub_dir_path = os.path.join(root_dir, sub_dir)
             if not os.path.isdir(sub_dir_path):
@@ -32,105 +37,199 @@ class FolderImageMaskDataset(Dataset):
             mask_dir = os.path.join(sub_dir_path, mask_folder_name)
 
             if os.path.exists(image_dir) and os.path.exists(mask_dir):
-                # 각 비디오(폴더)에 포함된 프레임 목록을 정렬하여 가져옵니다.
                 frames = sorted([f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png', '.jpeg'))])
                 
-                # 비디오의 전체 프레임 수가 clip_len보다 길거나 같아야 클립을 만들 수 있습니다.
                 if len(frames) >= clip_len:
-                    # clip_len 길이의 클립을 생성할 수 있는 모든 시작 지점을 self.clips에 추가합니다.
-                    # 예: 10프레임, clip_len=8 -> 시작 지점은 0, 1, 2 (총 3개 클립)
                     for i in range(len(frames) - clip_len + 1):
-                        # 각 클립은 (이미지 경로 리스트, 마스크 경로 리스트) 튜플로 저장합니다.
                         image_paths = [os.path.join(image_dir, frames[i+j]) for j in range(clip_len)]
                         mask_paths = [
                             os.path.join(mask_dir, os.path.splitext(frames[i+j])[0] + '.png') for j in range(clip_len)
                         ]
                         
-                        # 모든 마스크 파일이 실제로 존재하는지 확인 후 추가합니다.
                         if all(os.path.exists(p) for p in mask_paths):
                             self.clips.append((image_paths, mask_paths))
         
         print(f"Found {len(self.clips)} video clips.")
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
-        self.image_transform = transforms.Compose([
-            transforms.Resize(resolution),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # --- 2. Albumentations 증강 파이프라인 정의 ---
+        
+        # 2-1. 기하학적 변형 + 가려짐 (클립 전체에 일관되게 적용)
+        self.geometric_occlusion_aug = A.ReplayCompose([
+            A.HorizontalFlip(p=0.5),
+            A.Affine(
+                scale=(0.9, 1.1),
+                translate_percent=(0, 0.1),
+                rotate=(-15, 15),
+                shear=(-10, 10),
+                p=0.5,
+                interpolation=cv2.INTER_LINEAR,
+                mask_interpolation=cv2.INTER_NEAREST
+            ),
+            A.CoarseDropout(
+                max_holes=5, max_height=40, max_width=40,
+                min_holes=1, min_height=10, min_width=10,
+                fill_value=0,
+                mask_fill_value=0,
+                p=0.3
+            )
+        ], additional_targets={'mask_day': 'mask'})
+        
+        # 2-2. 저조도/노이즈 변형 (프레임마다 다르게, 야간 이미지에만 적용)
+        self.photometric_aug = A.Compose([
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.7),
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.3), p=0.5),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+            A.MotionBlur(blur_limit=7, p=0.3),
+            A.ImageCompression(quality_lower=40, quality_upper=80, p=0.2)
         ])
-        self.mask_transform = transforms.Compose([
-            transforms.Resize(resolution, interpolation=transforms.InterpolationMode.NEAREST),
-            transforms.ToTensor(),
+
+        # --- 3. 최종 변환 (Resize, ToTensor, Normalize) ---
+        
+        # 3-1. 야간 이미지용 (Resize -> Normalize -> ToTensor)
+        self.final_transform_night = A.Compose([
+            A.Resize(height=resolution[0], width=resolution[1], interpolation=cv2.INTER_LINEAR),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2() # <-- 야간 이미지는 여기서 텐서로 변환
         ])
         
-        # ▼▼▼ 수정된 부분: 원본 주간 이미지용 Transform (정규화 X, 0~1 스케일) ▼▼▼
-        self.original_image_transform = transforms.Compose([
-            transforms.Resize(resolution),
-            transforms.ToTensor(), # [0, 1] 범위로 변환
+        # 3-2. 마스크용 (Resize (Nearest))
+        # ▼▼▼ [FIX] ToTensorV2() 제거. NumPy 배열을 반환하도록 수정 ▼▼▼
+        self.final_transform_mask = A.Compose([
+            A.Resize(height=resolution[0], width=resolution[1], interpolation=cv2.INTER_NEAREST),
         ])
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         
-        self.color_jitter = transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)
+        # 3-3. 주간 원본 이미지용 (Resize)
+        # ▼▼▼ [FIX] ToTensorV2() 제거. NumPy 배열을 반환하도록 수정 ▼▼▼
+        self.final_transform_day = A.Compose([
+            A.Resize(height=resolution[0], width=resolution[1], interpolation=cv2.INTER_LINEAR),
+        ])
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     def __len__(self):
-        # ▼▼▼ 2. 로직 변경: 전체 이미지 수가 아닌, 생성된 '클립'의 총 개수를 반환합니다. ▼▼▼
         return len(self.clips)
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
+    # ▼▼▼ [수정] Albumentations 파이프라인 + 오류 수정 로직 적용 ▼▼▼
     def __getitem__(self, idx):
-        # ▼▼▼ 3. 로직 변경: 단일 이미지를 복제하는 대신, 연속된 프레임들을 불러와 실제 클립을 만듭니다. ▼▼▼
         image_paths, mask_paths = self.clips[idx]
         
-        image_clip_tensors = []
-        mask_clip_tensors = []
-        
-        # ▼▼▼ 수정된 부분 ▼▼▼
-        original_image_clip_tensors = [] # 원본 주간 이미지 텐서 리스트
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
-        # 데이터 증강(Augmentation)을 클립 단위로 일관되게 적용하기 위한 파라미터를 먼저 결정합니다.
-        apply_flip = self.is_train and self.use_augmentation and random.random() > 0.5
+        images_night_pil, images_mask_pil, images_day_pil = [], [], []
         
         try:
-            # 클립에 포함된 모든 프레임 경로에 대해 반복합니다.
+            # --- 1. 클립의 모든 PIL 이미지 로드 ---
             for img_path, msk_path in zip(image_paths, mask_paths):
-                image = Image.open(img_path).convert("RGB")
-                mask = Image.open(msk_path).convert("L")
+                images_night_pil.append(Image.open(img_path).convert("RGB"))
+                images_mask_pil.append(Image.open(msk_path).convert("L"))
                 
-                # ▼▼▼ 수정된 부분: 원본 주간 이미지 로드 ▼▼▼
                 relative_path = os.path.relpath(img_path, self.root_dir)
                 original_img_path = os.path.join(self.original_data_root, relative_path)
-                original_image = Image.open(original_img_path).convert("RGB")
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                images_day_pil.append(Image.open(original_img_path).convert("RGB"))
+            
+            # --- 2. PIL -> Numpy 변환 ---
+            images_night_np = [np.array(img) for img in images_night_pil]
+            images_mask_np = [np.array(img) for img in images_mask_pil]
+            images_day_np = [np.array(img) for img in images_day_pil]
 
-                # is_train 모드이고, use_augmentation이 True일 때만 데이터 증강을 적용합니다.
+            # --- 3. 증강 적용 ---
+            replay_data = None
+            aug_night_list, aug_mask_list, aug_day_list = [], [], []
+
+            for t in range(self.clip_len):
+                night_t, mask_t, day_t = images_night_np[t], images_mask_np[t], images_day_np[t]
+
+                # ▼▼▼ [FIX] Shape 불일치 해결: 증강 전 크기 강제 일치 ▼▼▼
+                night_h, night_w = night_t.shape[:2]
+                if mask_t.shape[:2] != (night_h, night_w):
+                    mask_t = cv2.resize(mask_t, (night_w, night_h), interpolation=cv2.INTER_NEAREST)
+                if day_t.shape[:2] != (night_h, night_w):
+                    day_t = cv2.resize(day_t, (night_w, night_h), interpolation=cv2.INTER_LINEAR)
+                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
                 if self.is_train and self.use_augmentation:
-                    # 클립의 모든 프레임에 동일한 좌우 반전을 적용하여 일관성을 유지합니다.
-                    if apply_flip:
-                        image = image.transpose(Image.FLIP_LEFT_RIGHT)
-                        mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
-                        original_image = original_image.transpose(Image.FLIP_LEFT_RIGHT) # <-- 추가
+                    # 3-1. 기하학적 + 가려짐 (클립 전체에 일관되게 적용)
+                    if t == 0:
+                        transformed = self.geometric_occlusion_aug(image=night_t, mask=mask_t, mask_day=day_t)
+                        replay_data = transformed['replay']
+                    else:
+                        transformed = A.ReplayCompose.replay(replay_data, image=night_t, mask=mask_t, mask_day=day_t)
                     
-                    # 색상 변형은 각 프레임에 독립적으로 적용될 수 있습니다. (야간 이미지만)
-                    image = self.color_jitter(image)
+                    night_t = transformed['image']
+                    mask_t = transformed['mask']
+                    day_t = transformed['mask_day']
 
-                image_clip_tensors.append(self.image_transform(image))
-                mask_clip_tensors.append(self.mask_transform(mask))
+                    # 3-2. 저조도/노이즈 (프레임마다 다르게, 야간 이미지에만 적용)
+                    night_t = self.photometric_aug(image=night_t)['image']
                 
-                # ▼▼▼ 수정된 부분 ▼▼▼
-                original_image_clip_tensors.append(self.original_image_transform(original_image))
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                aug_night_list.append(night_t)
+                aug_mask_list.append(mask_t)
+                aug_day_list.append(day_t)
+            
+            # --- 4. 최종 변환 (Resize, Normalize, ToTensor) ---
+            tensor_night_list, tensor_mask_list, tensor_day_list = [], [], []
+            
+            for t in range(self.clip_len):
+                # 4-1. 야간 (Resize + Normalize + ToTensor)
+                night_tensor = self.final_transform_night(image=aug_night_list[t])['image']
+                
+                # 4-2. 마스크 (Resize(Nearest) + ToTensor(manual))
+                # ▼▼▼ [FIX] 'mask_resized_np'는 이제 NumPy 배열임 (이름 일치) ▼▼▼
+                mask_resized_np = self.final_transform_mask(image=aug_mask_list[t])['image']
+                # ToTensorV2가 없으므로 from_numpy가 올바르게 작동함
+                mask_tensor = torch.from_numpy(mask_resized_np).float().unsqueeze(0) / 255.0
+                
+                # 4-3. 주간 (Resize + ToTensor(manual))
+                # ▼▼▼ [FIX] 'day_resized_np'는 이제 NumPy 배열임 (이름 일치) ▼▼▼
+                day_resized_np = self.final_transform_day(image=aug_day_list[t])['image']
+                # ToTensorV2가 없으므로 from_numpy가 올바르게 작동함
+                day_tensor = torch.from_numpy(day_resized_np.transpose(2, 0, 1)).float() / 255.0
+                
+                tensor_night_list.append(night_tensor)
+                tensor_mask_list.append(tensor_mask_list) # <-- 이런! 여기 버그가 있었네요. 수정합니다.
+                tensor_day_list.append(day_tensor)
 
         except FileNotFoundError as e:
             print(f"Warning: File not found, skipping this clip. Details: {e}")
-            return None # DataLoader의 collate_fn에서 None을 처리해야 합니다.
+            return None 
+        except Exception as e_getitem:
+            # 오류 메시지에 경로를 포함하여 디버깅 용이성 향상
+            path_info = image_paths[0] if image_paths else 'N/A'
+            print(f"Warning: Error processing clip {idx} (path: {path_info}), skipping. Details: {e_getitem}")
+            return None 
 
-        # 리스트에 담긴 각 프레임 텐서들을 stack하여 최종 클립 텐서를 만듭니다.
-        image_clip = torch.stack(image_clip_tensors, dim=0)
-        mask_clip = torch.stack(mask_clip_tensors, dim=0)
+        # --- 5. 텐서 스택 ---
+        if not tensor_night_list:
+             return None
+             
+        # ▼▼▼ [FIX] 위에서 발견한 버그 수정 (tensor_mask_list를 append) ▼▼▼
+        # (이전 코드: tensor_mask_list.append(tensor_mask_list) -> 재귀 오류 또는 메모리 폭발)
+        # (수정된 코드: 4.2에서 tensor_mask_list.append(mask_tensor) 로 수정되어야 함)
         
-        # ▼▼▼ 수정된 부분 ▼▼▼
-        original_image_clip = torch.stack(original_image_clip_tensors, dim=0)
+        # 위 코드 블록 4.2에서 수정을 다시 진행하겠습니다.
+        # 
+        # --- 4. 최종 변환 (Resize, Normalize, ToTensor) ---
+        tensor_night_list, tensor_mask_list, tensor_day_list = [], [], []
+
+        for t in range(self.clip_len):
+            # 4-1. 야간 (Resize + Normalize + ToTensor)
+            night_tensor = self.final_transform_night(image=aug_night_list[t])['image']
+
+            # 4-2. 마스크 (Resize(Nearest) + ToTensor(manual))
+            mask_resized_np = self.final_transform_mask(image=aug_mask_list[t])['image']
+            mask_tensor = torch.from_numpy(mask_resized_np).float().unsqueeze(0) / 255.0
+
+            # 4-3. 주간 (Resize + ToTensor(manual))
+            day_resized_np = self.final_transform_day(image=aug_day_list[t])['image']
+            day_tensor = torch.from_numpy(day_resized_np.transpose(2, 0, 1)).float() / 255.0
+
+            tensor_night_list.append(night_tensor)
+            tensor_mask_list.append(mask_tensor) # <-- [정정] 여기가 올바른 수정입니다.
+            tensor_day_list.append(day_tensor)
+
+        # --- 5. 텐서 스택 (이제 안전함) ---
+        image_clip = torch.stack(tensor_night_list, dim=0)
+        mask_clip = torch.stack(tensor_mask_list, dim=0)
+        original_image_clip = torch.stack(tensor_day_list, dim=0)
         
         return image_clip, mask_clip, original_image_clip # 3개 항목 반환
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+    
+    
