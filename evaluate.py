@@ -208,8 +208,14 @@ class EvalFolderImageMaskDataset(Dataset):
 # ▲▲▲ [클래스 추가 끝] ▲▲▲
 
 # ▼▼▼ [개선] run_name 추가, 랜덤 시드 수정 ▼▼▼
+# [evaluate.py] 파일의 기존 visualize_predictions 함수를
+# 아래의 코드로 완전히 대체하세요.
+
+# [evaluate.py] 파일의 기존 visualize_predictions 함수를
+# 아래의 코드로 완전히 대체하세요.
+
 def visualize_predictions(model, dataset, device, eval_cfg, common_cfg, run_name="Evaluation"):
-    """모델 예측 시각화 (4x5 플롯: 야간/복원/GT마스크/예측마스크)"""
+    """모델 예측 시각화 (5x5 플롯: 야간/원본주간/복원주간/GT마스크/예측마스크)"""
     logger.info(f"--- Generating visualization for {run_name} ---")
 
     if isinstance(dataset, Subset):
@@ -233,12 +239,29 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg, run_name
     random_subset_indices = random.sample(range(num_samples_available), num_samples_to_check)
     actual_indices = [indices_to_sample_from[i] for i in random_subset_indices]
 
-    fig, axes = plt.subplots(4, num_samples_to_check, figsize=(4 * num_samples_to_check, 16), squeeze=False) # squeeze=False 추가
+    # ▼▼▼ [수정됨] 4줄 -> 5줄, figsize 16 -> 20 ▼▼▼
+    fig, axes = plt.subplots(5, num_samples_to_check, figsize=(4 * num_samples_to_check, 20), squeeze=False) 
     fig.suptitle(f'{run_name} Prediction Visualization: Random Samples', fontsize=16)
 
     model.eval()
+    
+    # ▼▼▼ [기능 추가] 시각화에 사용된 샘플 경로를 로깅하기 위한 헤더 ▼▼▼
+    logger.info(f"--- Visualization Samples ({run_name}) ---")
+    
     with torch.no_grad():
         for i, idx in enumerate(tqdm(actual_indices, desc=f"Visualizing ({run_name})")):
+            
+            # ▼▼▼ [기능 추가] 데이터 로드 전에 경로 정보 가져오기 및 로깅 ▼▼▼
+            try:
+                # dataset_to_sample.clips[idx] -> (image_paths_list, mask_paths_list)
+                clip_image_paths, _ = dataset_to_sample.clips[idx]
+                # 클립의 첫 번째 프레임 경로를 로깅
+                path_to_log = clip_image_paths[0] 
+                logger.info(f"  Sample {i+1}/{num_samples_to_check} (Index: {idx}): {path_to_log}")
+            except Exception as e_path:
+                logger.warning(f"  Sample {i+1}/{num_samples_to_check} (Index: {idx}): Could not retrieve file path. {e_path}")
+            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
             try:
                 data_sample = dataset_to_sample[idx]
             except Exception as e:
@@ -266,13 +289,15 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg, run_name
                     logger.error(f"OOM during visualization for sample {idx}. Skipping sample.")
                 else:
                     logger.error(f"Model forward pass failed during visualization for sample {idx}: {e}")
-                for row in range(4):
+                # ▼▼▼ [수정됨] 4줄 -> 5줄 ▼▼▼
+                for row in range(5):
                      axes[row, i].set_title(f"Sample {idx}\n(Error)")
                      axes[row, i].axis('off')
                 continue
             except Exception as e:
                 logger.error(f"Model forward pass failed during visualization for sample {idx}: {e}")
-                for row in range(4):
+                # ▼▼▼ [수정됨] 4줄 -> 5줄 ▼▼▼
+                for row in range(5):
                      axes[row, i].set_title(f"Sample {idx}\n(Error)")
                      axes[row, i].axis('off')
                 continue
@@ -283,47 +308,57 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg, run_name
             # [개선] run_name에 따라 첫 번째 행 제목 변경
             first_row_title = "Original Night" if "Night" in run_name else "Original Day"
 
-            plot_titles = [first_row_title, "Reconstructed Day", "Ground Truth Mask", "Predicted Mask"]
+            # ▼▼▼ [수정됨] 'Original Day (GT)' 행 추가 (총 5개) ▼▼▼
+            plot_titles = [
+                first_row_title, 
+                "Original Day (GT)", 
+                "Reconstructed Day", 
+                "Ground Truth Mask", 
+                "Predicted Mask"
+            ]
             tensors_to_plot = [
                 video_clip[frame_idx] if frame_idx < video_clip.shape[0] else None,
-                None,
+                original_day_clip[frame_idx] if frame_idx < original_day_clip.shape[0] else None,
+                None, # Reconstructed Day (자리 비워두기)
                 mask_clip[frame_idx] if frame_idx < mask_clip.shape[0] else None,
                 predicted_mask_seq.squeeze(0)[frame_idx] if frame_idx < predicted_mask_seq.shape[1] else None
             ]
+            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
             use_enhancement_viz = reconstructed_images_flat is not None
             
-            # ▼▼▼ [BUG FIX 7] "Night" 평가 시에만 복원 이미지 시각화 ▼▼▼
             if use_enhancement_viz and "Night" in run_name: 
                  try:
                     b_viz, t_viz, c_viz, h_viz, w_viz = video_clip_batch.shape
                     recon_images_seq = reconstructed_images_flat.view(b_viz, t_viz, c_viz, h_viz, w_viz)
                     if frame_idx < recon_images_seq.shape[1]:
-                        tensors_to_plot[1] = recon_images_seq.squeeze(0)[frame_idx]
+                        # ▼▼▼ [수정됨] 인덱스 1 -> 2 (Reconstructed Day는 이제 3번째 줄) ▼▼▼
+                        tensors_to_plot[2] = recon_images_seq.squeeze(0)[frame_idx]
                  except Exception as e_recon_viz:
                     logger.warning(f"Viz sample {idx}: Error processing reconstructed image: {e_recon_viz}")
-            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
             for row, (tensor, title) in enumerate(zip(tensors_to_plot, plot_titles)):
                 ax = axes[row, i]
                 if tensor is not None and tensor.nelement() > 0:
                     try:
-                        if row == 0: # 원본 야간 또는 주간
+                        # ▼▼▼ [수정됨] Plotting 로직 변경 (row 1, 2가 이미지) ▼▼▼
+                        if row == 0: # 원본 야간 또는 주간 (Input)
                             img_np = unnormalize(tensor).numpy().transpose(1, 2, 0)
                             ax.imshow(np.clip(img_np, 0, 1))
-                        elif row == 1: # 복원 주간
-                            img_np = tensor.cpu().numpy().transpose(1, 2, 0) # 이미 0~1
+                        elif row == 1 or row == 2: # 원본 주간(GT) 또는 복원 주간(Pred)
+                            # 두 이미지 모두 [0, 1] 범위의 텐서임 (unnormalize 필요 없음)
+                            img_np = tensor.cpu().numpy().transpose(1, 2, 0) 
                             ax.imshow(np.clip(img_np, 0, 1))
-                        else: # 마스크 (GT, Pred)
+                        else: # 마스크 (GT, Pred) (row 3, 4)
                             img_np = tensor.squeeze().cpu().numpy()
                             ax.imshow(img_np, cmap='gray')
+                        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
                         full_title = f"Sample {idx}\n{title}" if row == 0 else title
                         ax.set_title(full_title)
                     except Exception as e_plot:
                          ax.set_title(f"Plot Error: {e_plot}")
                 else:
-                    # ▼▼▼ [BUG FIX 7] "Day" 평가 시 "Not Available"이 올바르게 표시됨 ▼▼▼
                     ax.set_title(f"{title}\n(Not Available)")
                 ax.axis('off')
 
@@ -349,7 +384,6 @@ def visualize_predictions(model, dataset, device, eval_cfg, common_cfg, run_name
         logger.info(f"Visualization image saved to: {save_path}")
     except Exception as e:
         logger.error(f"Failed to save visualization image to {save_path}: {e}")
-# ▲▲▲ [개선 완료] ▲▲▲
 
 # ▼▼▼ [신규] 평가 로직을 별도 함수로 분리 ▼▼▼
 # --- [BUG FIX 6] calculate_warping_error 인자 추가 ---

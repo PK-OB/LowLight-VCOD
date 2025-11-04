@@ -3,7 +3,7 @@
 class Config:
     # --- 공통 설정 ---
     common = {
-        'gpu_ids': '0,1,2,3',
+        'gpu_ids': '1,2,3',
         'clip_len': 8,
         'num_workers': 24,
     }
@@ -61,20 +61,20 @@ class Config:
     # --- 평가 설정 ---
     evaluate = {
         'experiment': 'proposed',
-        'batch_size': 1,
-        'visualization_path': 'evaluation_results/1103_1452_aug_MoCA-Mask.png', # (저장 경로 예시)
-        'checkpoint_path': 'checkpoints/1103_1452_aug.pth', #           (평가할 모델 경로)
+        'batch_size': 4,
+        'visualization_path': 'evaluation_results/1104/1030_1746_COD10K3.png', # (저장 경로 예시)
+        'checkpoint_path': 'checkpoints/1030_1746.pth', #           (평가할 모델 경로)
 
         # ▼▼▼ 1. 여기에 새로운 설정을 추가합니다 ▼▼▼
         # -----------------------------------------------------------------
         'eval_dataset_type': 'folder',  # 'folder' 또는 'moca_csv' (기본값)
         
         # 'folder' 타입을 사용할 경우
-        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night', # <-- 여기에 새 테스트셋 경로 입력!
+        'eval_folder_data_root': '/home/sjy/paper/JED-VCOD/data/COD10K_Night', # <-- 여기에 새 테스트셋 경로 입력!
         
         # ▼▼▼ 수정된 부분 ▼▼▼
         # (평가 시에도 원본 주간 이미지가 필요합니다. Test_Night의 원본 경로로 수정해주세요)
-        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test',
+        'eval_original_data_root': '/home/sjy/paper/JED-VCOD/data/COD10K',
         # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         
         'eval_image_folder_name': 'Imgs',
