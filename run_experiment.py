@@ -27,6 +27,7 @@ from datasets.folder_mask_dataset import FolderImageMaskDataset # <-- Multi-Task
 from utils.losses import DiceLoss, FocalLoss, BoundaryLoss
 from utils.logger import setup_logger
 from utils.cutmix import cutmix_data # <-- Multi-Task CutMix 임포트
+from utils.quantization import prepare_model_for_quantization, calibrate_model, convert_to_quantized # <-- Quantization 임포트
 
 def unnormalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     """정규화된 이미지 텐서를 원래 이미지로 되돌리는 함수 (변경 없음)"""
@@ -545,6 +546,17 @@ def main(args):
     if gpu_ids and len(gpu_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=gpu_ids)
     model.to(device)
+    
+    # Quantization 적용 (QAT - Quantization-Aware Training)
+    if train_cfg.get('use_quantization', False) and train_cfg.get('quantization_type') == 'qat':
+        logger.info("Applying Quantization-Aware Training (QAT)")
+        model = prepare_model_for_quantization(
+            model, 
+            quantization_type='qat',
+            backend=train_cfg.get('quantization_backend', 'fbgemm')
+        )
+        model.to(device)
+        logger.info("QAT enabled - model will be quantized during training")
 
     # 옵티마이저 (변경 없음)
     try:

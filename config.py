@@ -3,7 +3,7 @@
 class Config:
     # --- 공통 설정 ---
     common = {
-        'gpu_ids': '0,1',
+        'gpu_ids': '2,3',
         'clip_len': 8,
         'num_workers': 12,
     }
@@ -25,8 +25,8 @@ class Config:
         
         # --- 학습 하이퍼파라미터 (Transformer용 조정 예시) ---
         'epochs': 5000, # Transformer는 더 많은 에포크 필요할 수 있음
-        'batch_size': 4, # 해상도 증가로 배치 크기 감소 (8->4)
-        'val_batch_size': 8, # 검증 시에는 더 큰 배치 사용 가능
+        'batch_size': 8, # 해상도 증가로 배치 크기 감소 (8->4)
+        'val_batch_size': 16, # 검증 시에는 더 큰 배치 사용 가능
         'lr': 5e-5,          # 학습률 조정 (1e-5->5e-5: 수렴 속도 개선)
         'weight_decay': 0.05, # Weight Decay 높이기
         'clip_grad_norm': 1.0, # 그래디언트 클리핑 최대 값
@@ -53,9 +53,15 @@ class Config:
         'cutmix_prob': 0.5,
         'checkpoint_dir': 'checkpoints',
         'log_dir': 'logs',
-        'checkpoint_name': '0106_경량화이전_0.5_0.3_0.5.pth', # 체크포인트 이름 변경
+        'checkpoint_name': '0106_quantization_0.5_0.3_0.5.pth', # 체크포인트 이름 변경
         'debug_image_interval': 10, # 이미지 저장 빈도 조정
         'patience': 300, # Early stopping patience 늘리기 (Transformer 학습 안정화 시간 고려)
+        
+        # --- Quantization (양자화) 설정 ---
+        'use_quantization': True, # Quantization 사용 여부
+        'quantization_type': 'dynamic', # 'dynamic', 'static', 'qat' (Quantization-Aware Training)
+        'quantization_backend': 'fbgemm', # 'fbgemm' (x86), 'qnnpack' (ARM)
+        'quantization_dtype': 'qint8', # 'qint8', 'float16'
     }
     
     # --- 평가 설정 ---
