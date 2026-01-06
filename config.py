@@ -25,8 +25,8 @@ class Config:
         
         # --- 학습 하이퍼파라미터 (Transformer용 조정 예시) ---
         'epochs': 5000, # Transformer는 더 많은 에포크 필요할 수 있음
-        'batch_size': 8, # 해상도 증가로 배치 크기 감소 (8->4)
-        'val_batch_size': 16, # 검증 시에는 더 큰 배치 사용 가능
+        'batch_size': 4, # 해상도 증가로 배치 크기 감소 (8->4)
+        'val_batch_size': 8, # 검증 시에는 더 큰 배치 사용 가능
         'lr': 5e-5,          # 학습률 조정 (1e-5->5e-5: 수렴 속도 개선)
         'weight_decay': 0.05, # Weight Decay 높이기
         'clip_grad_norm': 1.0, # 그래디언트 클리핑 최대 값
