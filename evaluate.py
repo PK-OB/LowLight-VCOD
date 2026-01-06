@@ -331,7 +331,10 @@ def run_evaluation_pass(run_name, data_root, original_data_root, model, raft_mod
         return torch.utils.data.dataloader.default_collate(batch) if batch else (None,)*3
 
     test_loader = DataLoader(test_dataset, batch_size=eval_cfg.get('batch_size', 16), shuffle=False, num_workers=common_cfg.get('num_workers', 4), collate_fn=collate_fn)
+    
+    # [FIX] Metrics 초기화
     metrics = SODMetrics()
+    metrics.reset()  # 명시적 초기화
     
     total_we = 0.0; cnt_we = 0; total_enh = 0.0; cnt_enh = 0
 
@@ -350,14 +353,27 @@ def run_evaluation_pass(run_name, data_root, original_data_root, model, raft_mod
                 continue
             except: continue
 
-            # 1. Metrics
+            # 1. Metrics - [FIX] 데이터 형식 수정
             preds_flat = rearrange(preds, 'b t c h w -> (b t) c h w')
             gt_flat = gt_masks.view(b*t, 1, h, w)
-            preds_np = (preds_flat.cpu().numpy() * 255).astype(np.uint8)
-            gts_np = (gt_flat.cpu().numpy() > 0.5).astype(np.uint8) * 255
             
+            # [수정] squeeze(1)로 채널 차원 제거, GT 이진화 제거
+            preds_np = (preds_flat.squeeze(1).cpu().numpy() * 255).astype(np.uint8)  # (B*T, H, W)
+            gts_np = (gt_flat.squeeze(1).cpu().numpy() * 255).astype(np.uint8)  # (B*T, H, W)
+            
+            # [디버그] 첫 배치만 로깅
+            if not hasattr(run_evaluation_pass, '_debug_logged'):
+                logger.info(f"[DEBUG] Pred shape: {preds_np.shape}, dtype: {preds_np.dtype}, range: [{preds_np.min()}, {preds_np.max()}]")
+                logger.info(f"[DEBUG] GT shape: {gts_np.shape}, dtype: {gts_np.dtype}, unique values: {np.unique(gts_np)}")
+                logger.info(f"[DEBUG] Sample 0 - Pred mean: {preds_np[0].mean():.4f}, GT mean: {gts_np[0].mean():.4f}")
+                run_evaluation_pass._debug_logged = True
+            
+            # [수정] 빈 GT 체크 제거 - metric 내부에서 처리
             for i in range(b*t):
-                if gts_np[i].max() > 0: metrics.step(pred=preds_np[i].squeeze(), gt=gts_np[i].squeeze())
+                try:
+                    metrics.step(pred=preds_np[i], gt=gts_np[i])
+                except Exception as e:
+                    logger.warning(f"Metric calculation failed for sample {i}: {e}")
 
             # 2. Enhancement Loss (Night only)
             if recon is not None and "Night" in run_name:

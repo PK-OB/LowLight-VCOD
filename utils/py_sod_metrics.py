@@ -25,14 +25,19 @@ class SODMetrics:
         :param pred: [0, 255] 범위의 uint8 numpy 배열 (예측 마스크)
         :param gt: [0, 255] 범위의 uint8 numpy 배열 (정답 마스크)
         """
-        if pred.dtype != np.uint8:
-            pred = (pred * 255).astype(np.uint8)
-        if gt.dtype != np.uint8:
-            gt = (gt * 255).astype(np.uint8)
-            
+        # [FIX] Shape 검증 강화
+        if pred.ndim != 2:
+            raise ValueError(f"Pred must be 2D, got shape {pred.shape}")
+        if gt.ndim != 2:
+            raise ValueError(f"GT must be 2D, got shape {gt.shape}")
         if pred.shape != gt.shape:
-            # [BUG FIX 2] PIL.Image를 사용하도록 수정 (cv2 의존성 줄임)
-            pred = np.array(Image.fromarray(pred).resize(gt.shape[::-1]))
+            raise ValueError(f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}")
+        
+        # 데이터 타입 변환
+        if pred.dtype != np.uint8:
+            pred = np.clip(pred * 255, 0, 255).astype(np.uint8)
+        if gt.dtype != np.uint8:
+            gt = np.clip(gt, 0, 255).astype(np.uint8)
 
         for calculator in self.metric_calculators:
             calculator.step(pred, gt)
@@ -42,11 +47,28 @@ class SODMetrics:
         모든 지표의 최종 평균 결과를 반환합니다.
         :return: 지표 이름을 키로, 평균값을 값으로 하는 딕셔너리
         """
-        if self.results is None:
-            self.results = {}
-            for calculator in self.metric_calculators:
-                self.results.update(calculator.get_results())
-        return self.results
+        # [FIX] 캐싱 제거 - 매번 새로 계산
+        results = {}
+        for calculator in self.metric_calculators:
+            results.update(calculator.get_results())
+        return results
+    
+    def reset(self):
+        """
+        평가 재시작 시 호출 - 모든 누적값 초기화
+        """
+        for calculator in self.metric_calculators:
+            calculator.num_samples = 0
+            calculator.total_value = 0
+            calculator.total_values = []
+            if hasattr(calculator, 'adaptive_f_results'):
+                calculator.adaptive_f_results = []
+            if hasattr(calculator, 'precisions'):
+                calculator.precisions = []
+            if hasattr(calculator, 'recalls'):
+                calculator.recalls = []
+            if hasattr(calculator, 'weighted_f_results'):
+                calculator.weighted_f_results = []
 
 # ==========================================================
 # 내부 지표 계산기 클래스 (Base, MAE, F-measure, E-measure 등)
@@ -97,7 +119,12 @@ class MAE(_BaseMetric):
 
     def step(self, pred: np.ndarray, gt: np.ndarray):
         pred, gt = self._prepare_data(pred, gt)
-        mae = np.mean(np.abs(pred - gt))
+        # [FIX] 빈 GT 처리 통일
+        if gt.sum() == 0:
+            # 빈 GT: 예측이 0에 가까울수록 좋음
+            mae = np.mean(pred)
+        else:
+            mae = np.mean(np.abs(pred - gt))
         self.total_value += mae
         self.num_samples += 1
 
@@ -392,9 +419,13 @@ class Smeasure(_BaseMetric):
         # 3. S-measure
         sm = 0.5 * s_object + 0.5 * s_region # 논문에서는 0.5:0.5 사용
         
-        if np.isnan(sm):
-            # GT가 아예 비어있는 경우 등
-            sm = 1.0 - pred_mean # 배경 예측 점수
+        # [FIX] NaN 처리 개선
+        if np.isnan(sm) or np.isinf(sm):
+            if gt.sum() == 0:
+                # GT가 완전히 비어있으면 배경 예측 점수
+                sm = 1.0 - pred.mean()
+            else:
+                sm = 0.0
 
         self.total_value += sm
         self.num_samples += 1
