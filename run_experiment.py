@@ -24,7 +24,6 @@ from config import cfg
 # ▼▼▼ [전략 1] 수정된 main_model (DCNetStyleVCOD) 임포트 ▼▼▼
 from models.main_model import DCNetStyleVCOD
 from datasets.folder_mask_dataset import FolderImageMaskDataset # <-- Multi-Task 데이터셋 임포트
-# ▼▼▼ [전략 2] 수정된 losses (BoundaryLoss 포함) 임포트 ▼▼▼
 from utils.losses import DiceLoss, FocalLoss, BoundaryLoss
 from utils.logger import setup_logger
 from utils.cutmix import cutmix_data # <-- Multi-Task CutMix 임포트

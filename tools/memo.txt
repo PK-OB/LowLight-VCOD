@@ -1,0 +1,7 @@
+
+
+/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night/plaice/Imgs/00720.jpg
+/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night/flatfish_0/Imgs/00640.jpg
+/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night/sole/Imgs/00675.jpg
+/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night/snow_leopard_4.2/Imgs/01820.jpg
+/home/sjy/paper/JED-VCOD/data/MoCA-Mask/Seq_Test_Night/seal/Imgs/00265.jpg
