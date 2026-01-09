@@ -68,18 +68,11 @@ class Config:
     evaluate = {
         'experiment': '0106',
         'batch_size': 1,  # 384×384 해상도에서 OOM 방지
-        'visualization_path': 'evaluation_results/1223/0106_경량화이전_0.5_0.3_0.5.png', # (저장 경로 예시)
+        'visualization_path': 'evaluation_results/0107/0106_경량화이전_0.5_0.3_0.5.png', # (저장 경로 예시)
         'checkpoint_path': 'checkpoints/0106_경량화이전_0.5_0.3_0.5.pth', #           (평가할 모델 경로)
         
         'visualization_hardcoded_paths': [
-            '''
-            '/home/sjy/paper/JED-VCOD/0_test_img/00004.jpg',
-            '/home/sjy/paper/JED-VCOD/0_test_img/00010.jpg',
-            '/home/sjy/paper/JED-VCOD/0_test_img/00011.jpg',
-            '/home/sjy/paper/JED-VCOD/0_test_img/00019.jpg',
-            '/home/sjy/paper/JED-VCOD/0_test_img/00026.jpg',
-            '/home/sjy/paper/JED-VCOD/0_test_img/00066.jpg'
-            '''
+           
         ],
 
         # ▼▼▼ 1. 여기에 새로운 설정을 추가합니다 ▼▼▼
